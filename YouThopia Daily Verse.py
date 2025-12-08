@@ -25,19 +25,22 @@ CHAT_ID = "-1001904672000"
 
 # Function to get a random Bible verse
 def get_random_verse():
-    url = "https://bible-api.com/?random=1"
-    response = requests.get(url)
-    if response.status_code == 200:
-        data = response.json()
-        return f"{data['reference']}\n\n{data['text']}"
-    else:
-        return "Sorry, I couldn't fetch a scripture right now."
+    try:
+       response = requests.get("https://bible-api.com/?random=1" ,  timeout= 10)
+       response.raise_for_status()
+       data = response.json()
+       return f"{data['reference']}\n\n{data['text']}"
+    except Exception as e:
+       print (f"Error fetching verse: {e}")
+       return  "I couldn't fetch a verse right now. Try again later."
 
 # Function to send an automatic Bible verse every morning
 def send_morning_verse():
-    print("Sending Morning Verse")
+    import logging
+    logging.basicConfig(level=logging.INFO, format="%(ascetime), - %(levelname)s -%(message)s")
+    logging.info("Sending Morning Verse")
     verse = get_random_verse()
-    bot.send_message(CHAT_ID, f"Hey, Good Morning! Here is Today's  Bible verse📖:\n\n{verse}")
+    bot.send_message(CHAT_ID, f"Hey, Good Morning! Here is Today's  Bible verse:\n\n{verse}")
 
 # Schedule the message to run every day at 06:00 AM
 schedule.every().day.at("06:00").do(send_morning_verse)
@@ -56,6 +59,13 @@ threading.Thread(target=run_scheduler, daemon=True).start()
 @bot.message_handler(commands=["verse"])
 def send_verse(message):
     bot.reply_to(message, get_random_verse())
+
+
+
+@bot.message_handler(commands=["ping"])
+def ping(message):
+
+    bot.reply_to(message, "I am alive and Kicking ✔")
 
 
 print("Bot is running....")
