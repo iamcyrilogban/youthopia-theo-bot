@@ -4,14 +4,18 @@ import time
 import requests
 import schedule
 import telebot
+import json
+import random
 import logging
 from flask import Flask
 from dotenv import load_dotenv
 
-import json
-GROUPS_FILE = "groups.json"
 
-#function to load group ID  from the file
+##------ GROUP  CONFIGURATION & FILE MANAGEMENT-------
+GROUPS_FILE = "groups.json"
+VERSES_FILE = "encouraging_verses.json"
+
+
 def load_groups():
     try:
         with open(GROUPS_FILE, "r")  as  f:
@@ -19,7 +23,7 @@ def load_groups():
     except FileNotFoundError:
         return set()
 
-#Function to save a new group ID
+#---FUNCTION TO SAVE A NEW GROUP ID----
 def save_group(group_id):
     groups = load_groups()
     groups.add(group_id)
@@ -43,11 +47,9 @@ def run_http_server():
 def keep_alive():
     t = threading.Thread(target=run_http_server)
     t.start()
-
-# Start the server immediately so Render sees the open port
 keep_alive()
-# --- END OF KEEP-ALIVE SERVER ---
-   
+
+#-----BOT SETUP CONFIGURATION---  
 # Load variables from .env file
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
@@ -57,18 +59,51 @@ bot = telebot.TeleBot(TOKEN)
 # Setup Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# Function to get a random Bible verse
+
+
+#-------RANDOM BIBLE VERSE------
+# def get_random_verse():
+#     try:
+#         response = requests.get("https://bible-api.com/?random=1", timeout=10)
+#         response.raise_for_status()
+#         data = response.json()
+#         return f"{data['reference']}\n\n{data['text']}"
+#     except Exception as e:
+#         logging.error(f"Error fetching verse: {e}")
+#         return "I couldn't fetch a verse right now. Try again later."
+    
 def get_random_verse():
     try:
-        response = requests.get("https://bible-api.com/?random=1", timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        return f"{data['reference']}\n\n{data['text']}"
+        # 1. Open "encouraging_verses.json" file
+        with open(VERSES_FILE, "r") as f:
+            data = json.load(f)
+            
+            
+            # 2. Get the list of "verses from the JSON FILE"
+            # verse_list = data["verses"]
+            
+            if isinstance(data, list):
+                verse_list = data
+            else:
+                verse_list = data["verses"]
+                
+            # 3. Pick one random reference
+            selected_ref = random.choice(verse_list)
+            
+            # 4. Fetch the text from the API
+            url = f"https://bible-api.com/{selected_ref.replace(' ',  '+')}?translation=kjv"
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            api_data = response.json()
+            
+            return f"{api_data['reference']}\n\n{api_data['text'].strip()}"
     except Exception as e:
-        logging.error(f"Error fetching verse: {e}")
-        return "I couldn't fetch a verse right now. Try again later."
+        logging.error(f"Error reading file or fetching verse: {e}")
+        
+        return "Psalm 23:1 \n\n The LORD is my shepherd, I lack nothing."
+        
 
-# Function to send an automatic Bible verse every morning
+#----MORNING SCHEDULER-----
 def send_morning_verse():
     logging.info("Sending Morning Verse to  all groups....")
     verse = get_random_verse()
@@ -76,13 +111,12 @@ def send_morning_verse():
     
     for chat_id in groups:
         try:
-            bot.send_message(chat_id, f"Hey Good Morning! Here is your Bible Verse For The Day📖: \n\n{verse}")
+            bot.send_message(chat_id, f"Hey Good Morning! Here is your Bible Verse For The Day: \n\n{verse}")
             time.sleep(0.5) #Wait 0.5 seconds To avoid hittting telegram limit
-        except  Exception as e:
+        except Exception as e:
             logging.error(f"Failed to send to group{chat_id}: {e}")
-  
     
-# --- SCHEDULER CONFIGURATION ---
+# --- RENDER SCHEDULER CONFIGURATION ---
 # Note: Render servers are usually UTC.
 # Nigeria (WAT) is UTC+1. So 05:00 UTC = 06:00 Nigeria time.
 schedule.every().day.at("05:00").do(send_morning_verse)
@@ -106,7 +140,7 @@ def ping(message):
     
     
     
-#-----When Bot is added to a group-----
+#-----WHEN BOT IS ADDED TO A GROUP-----
 @bot.message_handler(content_types=["new_chat_members"])
 def on_join(message):
     for new_member in message.new_chat_members:
@@ -130,11 +164,9 @@ def send_welcome(message):
     welcome_text = (
         f"👋 *Hi {user_first_name}, Welcome to YouThopia Daily Verse! \n\n I am a Christ-Centered community Bot ✝️* \n\n"
         "I am here to encourage you with God's word every day.\n\n"
-        "✨ *Here is what I can do:*\n"
+        " *Here is what I can do:*\n"
         "Daily Morning Verse (Automatic at 6:00 AM)\n"
-        "/read [Verse] - Read a specific Bible verse (e.g., /read John 3:16)\n"
         "/verse - Get a random encouraging verse right now\n"
-        "/find [topic] - Find verses for emotions (e.g., /find anxiety)\n"
         "/ping - Check if I am online\n\n"
         "📢 *Add me to your Group* to send verses to everyone!"
     )
