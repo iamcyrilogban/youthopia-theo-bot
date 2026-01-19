@@ -52,6 +52,15 @@ keep_alive()
 
 # --- HELPER FUNCTIONS ---
 
+def main_menu_keyboard():
+    """Creates the professional menu buttons"""
+    markup = telebot.types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+    btn_verse = telebot.types.KeyboardButton("Get Verse")
+    btn_ping = telebot.types.KeyboardButton("Check Status")
+    btn_help = telebot.types.KeyboardButton("Help")
+    markup.add(btn_verse, btn_ping, btn_help)
+    return markup
+
 def get_random_verse():
     try:
         # Load local file just to get the list of verses
@@ -138,15 +147,17 @@ def on_join(message):
             else:
                 print(f"Group {chat_name} is already in the database.")
 
-# --- WELCOME / HELP HANDLER ---
-@bot.message_handler(commands=['start', 'help'])
-def send_welcome(message):
+# --- START COMMAND (Greeting & Menu) ---
+@bot.message_handler(commands=['start'])
+def send_start(message):
     full_name = message.from_user.first_name
     user_first_name = full_name.split()[0] if full_name else "Friend"
     
-    welcome_text = (
-        f"Hello {user_first_name}, I am Theo.\n"
-        "The official assistant for the YouThopia Community.\n\n"
+    # FIXED: Added correct quotation marks for multi-line string
+    start_text = (
+        f"Hello {user_first_name}.\n"
+        "I am Theo.\n"
+        "The official assistant for the YouThopia Bible Community.\n\n"
         "My Mission: To deliver God's word to you every morning.\n\n"
         "Features:\n"
         "• Daily Verse: Sent automatically at 6:00 AM\n"
@@ -154,8 +165,43 @@ def send_welcome(message):
         "• /ping - Check connection status\n\n"
         "To share with friends, simply add me to your Group Chat to receive daily updates there automatically."
     )
+    
+    # Sends the text AND the buttons
+    bot.reply_to(message, start_text, reply_markup=main_menu_keyboard())
 
-    bot.reply_to(message, welcome_text, parse_mode="Markdown")  
+# --- HELP COMMAND (Instructions) ---
+@bot.message_handler(commands=['help'])
+def send_help(message):
+    help_text = (
+        "Usage Instructions:\n\n"
+        "1. Personal Use:\n"
+        "Tap the 'Get Verse' button for instant scripture.\n\n"
+        "2. Group Schedule:\n"
+        "Add me to any Telegram group. I will automatically register the group and send a verse every day at 06:00 AM.\n\n"
+        "System Commands:\n"
+        "/verse - Fetch a random scripture\n"
+        "/ping - Check server status\n"
+        "/start - Restart the bot menu"
+    )
+    bot.reply_to(message, help_text)
+
+# --- HANDLE BUTTON CLICKS ---
+@bot.message_handler(func=lambda message: True)
+def handle_messages(message):
+    text = message.text
+    
+    if text == "Get Verse":
+        bot.reply_to(message, get_random_verse(), parse_mode="Markdown")
+        
+    elif text == "Check Status":
+        bot.reply_to(message, "⚡ System is Online. Connected to Cloud Database.")
+        
+    elif text == "Help":
+        # Call the help function defined above
+        send_help(message)
+        
+    elif message.chat.type == "private":
+        bot.reply_to(message, "I did not recognize that command. Please use the menu below.", reply_markup=main_menu_keyboard())
 
 # --- START POLLING ---
 if __name__ == "__main__": 
