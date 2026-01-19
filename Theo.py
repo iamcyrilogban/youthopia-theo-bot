@@ -8,6 +8,9 @@ import json
 import random
 import logging
 from flask import Flask
+import certifi
+from pymongo import MongoClient
+from telebot.types  import Message
 from dotenv import load_dotenv
 
 
@@ -30,6 +33,32 @@ def save_group(group_id):
     with open(GROUPS_FILE, "w") as f:
         json.dump(list(groups), f)
         logging.info(f"Saved new group ID: {group_id}")
+        
+        
+        
+        
+        
+#--------DATABASE CONFIGURATION--------
+MONGO_URI = os.getenv("MONGO_URI")
+
+# 1. Connect to the Cloud
+# 'tlsCAFile' tells Python to trust the security certificate of the cloud server.
+try:
+    client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
+    
+    # 2. Select the Database (The Cabinet)
+    # We are opening a cabinet named "youthopia_db" inside the cloud.
+    db = client["youthopia_db"]           
+    
+    # 3. Select the Collection (The Folder)
+    # Inside the cabinet, we are grabbing a folder named "subscribed_groups".
+    groups_col = db["subscribed_groups"]  
+    
+    print("✅ Connected to MongoDB successfully!")
+
+except Exception as e:
+    print(f"Failed to connect to MongoDB: {e}")
+    
 
 
 
@@ -60,17 +89,6 @@ bot = telebot.TeleBot(TOKEN)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 
-
-#-------RANDOM BIBLE VERSE------
-# def get_random_verse():
-#     try:
-#         response = requests.get("https://bible-api.com/?random=1", timeout=10)
-#         response.raise_for_status()
-#         data = response.json()
-#         return f"{data['reference']}\n\n{data['text']}"
-#     except Exception as e:
-#         logging.error(f"Error fetching verse: {e}")
-#         return "I couldn't fetch a verse right now. Try again later."
     
 def get_random_verse():
     try:
@@ -103,18 +121,36 @@ def get_random_verse():
         return "Psalm 23:1 \n\n The LORD is my shepherd, I lack nothing."
         
 
-#----MORNING SCHEDULER-----
+# --- MORNING SCHEDULER (Now Connected to DB) ---
 def send_morning_verse():
-    logging.info("Sending Morning Verse to  all groups....")
-    verse = get_random_verse()
-    groups = load_groups()
+    logging.info("Sending Morning Verse to all groups....")
+    verse_text = get_random_verse()
     
-    for chat_id in groups:
-        try:
-            bot.send_message(chat_id, f"Hey Good Morning! Here is your Bible Verse For The Day: \n\n{verse}")
-            time.sleep(0.5) #Wait 0.5 seconds To avoid hittting telegram limit
-        except Exception as e:
-            logging.error(f"Failed to send to group{chat_id}: {e}")
+    try:
+        # FIXED: Now reading from MongoDB instead of the JSON file
+        all_groups = groups_col.find()
+        
+        for group in all_groups:
+            chat_id = group["_id"]
+            try:
+                bot.send_message(chat_id, f" Good Morning! Verse of the Day:\n\n{verse_text}", parse_mode="Markdown")
+                time.sleep(0.5) 
+                print(f"Sent to {chat_id}")
+            except Exception as e:
+                logging.error(f"Failed to send to {chat_id}: {e}")
+                
+    except Exception as e:
+        logging.error(f"Database Read Error: {e}")
+
+# --- SCHEDULER CONFIGURATION ---
+schedule.every().day.at("05:00").do(send_morning_verse)
+
+def run_scheduler():
+    while True:
+        schedule.run_pending()
+        time.sleep(60)
+
+threading.Thread(target=run_scheduler, daemon=True).start()
     
 # --- RENDER SCHEDULER CONFIGURATION ---
 # Note: Render servers are usually UTC.
@@ -129,14 +165,19 @@ def run_scheduler():
 # Start the scheduler in a separate thread
 threading.Thread(target=run_scheduler, daemon=True).start()
 
-# --- BOT COMMANDS ---
+# ---   BOT COMMANDS ---
 @bot.message_handler(commands=["verse"])
 def send_verse(message):
-    bot.reply_to(message, get_random_verse())
+    bot.reply_to(message, get_random_verse(), parse_mode="Markdown")
 
 @bot.message_handler(commands=["ping"])
 def ping(message):
-    bot.reply_to(message, "I am Alive and Kicking ✔")
+    bot.reply_to(message, "I am Alive, Kicking, and connected to the Cloud! ")
+
+@bot.message_handler(commands=['start', 'help'])
+def send_welcome(message):
+    full_name = message.from_user.first_name
+    user_first_name = full_name.split()[0] if full_name else "Friend"
     
     
     
@@ -144,34 +185,52 @@ def ping(message):
 @bot.message_handler(content_types=["new_chat_members"])
 def on_join(message):
     for new_member in message.new_chat_members:
+        # Check if the new member is ME (the bot)
         if new_member.id == bot.get_me().id:
-            save_group(message.chat.id)
-            bot.send_message(message.chat.id, "Hello! Thanks for adding me to the group. You will receive daily verses starting tomorrow by 6am!📖")   
-    
+            chat_id = message.chat.id
+            chat_name = message.chat.title
+            
+            # --- DATABASE LOGIC STARTS HERE ---
+            # 1. Ask the DB: "Do we already have this ID?"
+            if groups_col.count_documents({"_id": chat_id}) == 0:
+                
+                # 2. If NO, insert a new "card" into the folder
+                groups_col.insert_one({
+                    "_id": chat_id,
+                    "name": chat_name,
+                    "joined_at": message.date
+                })
+                print(f"Saved new group to DB: {chat_name}")
+                
+                bot.send_message(chat_id, "👋 Hello everyone! I am Theo. Thank you for welcoming me! I've added this group to my daily list. I will start sending encouraging scriptures here every morning at 6:00 AM! ")
+            else:
+                print(f"Group {chat_name} is already in the database.")
     
 # --- WELCOME COMMAND ---
 # Usage: /start or /help
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
-    # 1. Get the name, but SPLIT it to take only the first word
+    # 1. Get the user's first name
     full_name = message.from_user.first_name
     if full_name:
-        user_first_name = full_name.split()[0]  # "Cyril Ogban" -> "Cyril"
+        user_first_name = full_name.split()[0] 
     else:
-        user_first_name = "Friend"  # Fallback just in case
+        user_first_name = "Friend"
     
-    # 2. Create the welcome text
+    # 2. make a welcome text
     welcome_text = (
-        f"👋 *Hi {user_first_name}, Welcome to YouThopia Daily Verse! \n\n I am a Christ-Centered community Bot ✝️* \n\n"
-        "I am here to encourage you with God's word every day.\n\n"
-        " *Here is what I can do:*\n"
-        "Daily Morning Verse (Automatic at 6:00 AM)\n"
-        "/verse - Get a random encouraging verse right now\n"
-        "/ping - Check if I am online\n\n"
-        "📢 *Add me to your Group* to send verses to everyone!"
+        f"👋 *Hi {user_first_name}! I am Theo.* 🤖\n"
+        f"The official assistant for the **YouThopia Community**.\n\n"
+        "✝️ *My Mission:* To light up your phone with God's word every morning.\n\n"
+        "📜 *What I can do:*\n"
+        "• Send a Daily Verse automatically at 6:00 AM\n"
+        "• /verse - Give you instant encouragement\n"
+        "• /ping - Check my connection\n\n"
+        "📢 *Want Encouraging verses for your friends?*\n"
+        "Just add me to your **Group Chat**, and I'll start posting there automatically!"
     )
 
-    # 3. Send the message with Markdown enabled (for bold text)
+    # 3. Send message
     bot.reply_to(message, welcome_text, parse_mode="Markdown")  
 
 # --- INFINITE RESTART LOOP ---
