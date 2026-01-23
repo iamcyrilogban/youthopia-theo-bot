@@ -16,8 +16,7 @@ from datetime import datetime, timezone
 
 # --- CONFIGURATION ---
 load_dotenv()
-# TOKEN = os.getenv("BOT_TOKEN")
-TOKEN = "8322842073:AAEikbYlaKB1cU5xQ9jwaUusVF3NUWG1PHY"
+TOKEN = os.getenv("BOT_TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
 # Add ADMIN_ID to your .env file to secure the force_verse command
 ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
