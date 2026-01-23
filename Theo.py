@@ -35,7 +35,12 @@ BIBLE_API_URL = "https://bible-api.com"
 BIBLE_TRANSLATION = "web"
 MORNING_VERSE_TIME = "05:00"  # UTC (06:00 Nigeria Time)
 VERSES_FILE = "encouraging_verses.json"
-DEFAULT_VERSE = "Psalm 23:1\n\nThe LORD is my shepherd, I lack nothing."
+
+# UPDATED: Default verse is now a Dictionary so buttons work even if API fails
+DEFAULT_VERSE = {
+    "reference": "Psalm 23:1",
+    "text": "The LORD is my shepherd, I lack nothing."
+}
 
 # --- INITIALIZE BOT ---
 bot = telebot.TeleBot(TOKEN, parse_mode="Markdown")
@@ -207,9 +212,40 @@ def main_menu_keyboard():
     btn_ping = telebot.types.KeyboardButton("Check Status")
     btn_help = telebot.types.KeyboardButton("Help")
     
-
     markup.add(btn_verse, btn_sub, btn_ping, btn_help)
     return markup
+
+def get_verse_markup(verse_data, current_translation="web"):
+    """Creates Inline Buttons for Sharing and Translation Switching"""
+    markup = telebot.types.InlineKeyboardMarkup()
+    
+    # 1. Share Button (Uses Telegram Share URL)
+    # Reverted to clean share without promotional header
+    share_text = f"{verse_data['reference']} ({current_translation.upper()})\n\n{verse_data['text']}"
+    
+    share_url = f"https://t.me/share/url?url={requests.utils.quote(share_text)}"
+    markup.add(telebot.types.InlineKeyboardButton("📤 Share with Friends", url=share_url))
+    
+    # 2. Translation Buttons
+    ref = verse_data['reference']
+    
+    # Create row of buttons. Highlight the current one with brackets []
+    btn_web = telebot.types.InlineKeyboardButton(
+        "[WEB]" if current_translation == "web" else "WEB", 
+        callback_data=f"trans|web|{ref}"
+    )
+    btn_kjv = telebot.types.InlineKeyboardButton(
+        "[KJV]" if current_translation == "kjv" else "KJV", 
+        callback_data=f"trans|kjv|{ref}"
+    )
+    btn_bbe = telebot.types.InlineKeyboardButton(
+        "[BBE]" if current_translation == "bbe" else "BBE", 
+        callback_data=f"trans|bbe|{ref}"
+    )
+    
+    markup.row(btn_web, btn_kjv, btn_bbe)
+    return markup
+
 def load_verse_references():
     try:
         with open(VERSES_FILE, "r") as f:
@@ -223,17 +259,14 @@ def load_verse_references():
     except:
         return []
 
-def fetch_verse_from_api(reference):
+def fetch_verse_from_api(reference, translation="web"):
     try:
         formatted_ref = reference.replace(' ', '+')
-        url = f"{BIBLE_API_URL}/{formatted_ref}?translation={BIBLE_TRANSLATION}"
+        url = f"{BIBLE_API_URL}/{formatted_ref}?translation={translation}"
         
         response = requests.get(url, timeout=10)
         response.raise_for_status()
-        api_data = response.json()
-        
-        # CHANGED LINE BELOW: Added (WEB) to the reference header
-        return f"*{api_data['reference']}* (WEB)\n\n{api_data['text'].strip()}"
+        return response.json() # Returns the raw data dictionary
     except Exception as e:
         logger.error(f"API request failed: {e}")
         return None
@@ -241,21 +274,26 @@ def fetch_verse_from_api(reference):
 def get_random_verse():
     verse_list = load_verse_references()
     
-    if not verse_list:
-        return f"{DEFAULT_VERSE}"
-    
+    # Try 3 times to get a verse
     for _ in range(3):
-        selected_ref = random.choice(verse_list)
-        verse_text = fetch_verse_from_api(selected_ref)
-        if verse_text:
-            return verse_text
+        # Pick reference
+        selected_ref = random.choice(verse_list) if verse_list else "John 3:16"
+        # Fetch data
+        verse_data = fetch_verse_from_api(selected_ref)
+        if verse_data:
+            return verse_data # Returns dictionary: {'reference': '...', 'text': '...'}
         time.sleep(0.5)
     
-    return f"{DEFAULT_VERSE}"
+    # Fallback if API fails (Uses the Dictionary now)
+    return DEFAULT_VERSE
 
 def send_morning_verse():
     logger.info("Starting morning verse broadcast...")
-    verse_text = get_random_verse()
+    data = get_random_verse()
+    
+    # Prepare text and buttons
+    text = f"*{data['reference']}* (WEB)\n\n{data['text'].strip()}"
+    markup = get_verse_markup(data, "web")
     
     all_groups = db_handler.get_all_groups()
     success_count = 0
@@ -263,10 +301,7 @@ def send_morning_verse():
     for group in all_groups:
         chat_id = group["_id"]
         try:
-            bot.send_message(
-                chat_id,
-                f"*Good Morning!*\n\nVerse of the Day:\n\n{verse_text}"
-            )
+            bot.send_message(chat_id, f"*Good Morning!*\n\n{text}", reply_markup=markup)
             success_count += 1
             time.sleep(0.5)
         except telebot.apihelper.ApiTelegramException as e:
@@ -362,6 +397,7 @@ def force_verse(m):
 
     bot.reply_to(m, "Authorized. Sending verse blast now...")
     send_morning_verse()
+
 @bot.message_handler(commands=["reset_group"])
 def reset_group(m):
     """Safely removes group/user from DB (Admins Only in Groups)"""
@@ -395,8 +431,17 @@ def reset_group(m):
 @bot.message_handler(commands=["verse"])
 def send_verse(message):
     try:
-        verse = get_random_verse()
-        bot.reply_to(message, verse)
+        # 1. Get Dictionary Data
+        data = get_random_verse()
+        
+        # 2. Format Text
+        msg_text = f"*{data['reference']}* (WEB)\n\n{data['text'].strip()}"
+        
+        # 3. Create Buttons using the helper function
+        markup = get_verse_markup(data, "web")
+        
+        # 4. Send with Buttons
+        bot.reply_to(message, msg_text, reply_markup=markup)
     except Exception as e:
         logger.error(f"Error in /verse command: {e}")
         bot.reply_to(message, "Error fetching verse.")
@@ -453,6 +498,34 @@ def on_leave(message):
     if message.left_chat_member.id == BOT_ID:
         chat_id = message.chat.id
         db_handler.remove_group(chat_id)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("trans|"))
+def handle_translation_switch(call):
+    """Updates the verse text when a translation button is clicked"""
+    try:
+        # Parse the data we hid in the button: "trans|kjv|John 3:16"
+        _, new_trans, ref = call.data.split("|", 2)
+        
+        # Fetch the NEW translation
+        new_data = fetch_verse_from_api(ref, new_trans)
+        
+        if new_data:
+            # Create the new text
+            new_text = f"*{new_data['reference']}* ({new_trans.upper()})\n\n{new_data['text'].strip()}"
+            
+            # Update the message in the chat (Edit Message)
+            bot.edit_message_text(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                text=new_text,
+                parse_mode="Markdown",
+                reply_markup=get_verse_markup(new_data, new_trans) # Update buttons too
+            )
+            bot.answer_callback_query(call.id, f"Switched to {new_trans.upper()}")
+            
+    except Exception as e:
+        logger.error(f"Translation switch failed: {e}")
+        bot.answer_callback_query(call.id, "Failed to switch translation.")
 
 @bot.message_handler(func=lambda m: True)
 def handle_text(m):
