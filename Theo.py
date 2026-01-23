@@ -7,6 +7,7 @@ import telebot
 import json
 import random
 import logging
+import re  # <--- CRITICAL IMPORT
 from flask import Flask
 import certifi
 from pymongo import MongoClient
@@ -15,7 +16,8 @@ from datetime import datetime, timezone
 
 # --- CONFIGURATION ---
 load_dotenv()
-TOKEN = os.getenv("BOT_TOKEN")
+# TOKEN = os.getenv("BOT_TOKEN")
+TOKEN = "8322842073:AAEikbYlaKB1cU5xQ9jwaUusVF3NUWG1PHY"
 MONGO_URI = os.getenv("MONGO_URI")
 # Add ADMIN_ID to your .env file to secure the force_verse command
 ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
@@ -35,6 +37,85 @@ BIBLE_API_URL = "https://bible-api.com"
 BIBLE_TRANSLATION = "web"
 MORNING_VERSE_TIME = "05:00"  # UTC (06:00 Nigeria Time)
 VERSES_FILE = "encouraging_verses.json"
+
+# --- SMART LISTENING CONFIGURATION ---
+# 1. The Book List Pattern
+BIBLE_BOOKS_PATTERN = (
+    r"\b("
+    r"Genesis|Gen?|Gn|"
+    r"Exodus|Exod?|Ex|"
+    r"Leviticus|Lev?|Lv|"
+    r"Numbers|Num?|Nm|"
+    r"Deuteronomy|Deut?|Dt|"
+    r"Joshua|Josh?|Jsh|"
+    r"Judges|Judg?|Jdg|"
+    r"Ruth|Rth|"
+    r"1\s?Samuel|1\s?Sam?|1\s?Sm|"
+    r"2\s?Samuel|2\s?Sam?|2\s?Sm|"
+    r"1\s?Kings?|1\s?Kgs|"
+    r"2\s?Kings?|2\s?Kgs|"
+    r"1\s?Chronicles?|1\s?Chr?|"
+    r"2\s?Chronicles?|2\s?Chr?|"
+    r"Ezra|Ezr|"
+    r"Nehemiah|Neh|"
+    r"Esther|Esth?|"
+    r"Job|Jb|"
+    r"Psalms?|Ps|"
+    r"Proverbs?|Prov?|Pr|"
+    r"Ecclesiastes|Eccl?|Qoh|"
+    r"Song\s?of\s?Solomon|Song?|Canticles|"
+    r"Isaiah|Isa?|"
+    r"Jeremiah|Jer?|"
+    r"Lamentations|Lam?|"
+    r"Ezekiel|Ezek?|"
+    r"Daniel|Dan?|Dn|"
+    r"Hosea|Hos|"
+    r"Joel|Jl|"
+    r"Amos|Am|"
+    r"Obadiah|Obad?|Ob|"
+    r"Jonah|Jon|"
+    r"Micah|Mic|"
+    r"Nahum|Nah?|"
+    r"Habakkuk|Hab?|"
+    r"Zephaniah|Zeph?|"
+    r"Haggai|Hag?|"
+    r"Zechariah|Zech?|"
+    r"Malachi|Mal?|"
+    r"Matthew|Matt?|Mt|"
+    r"Mark|Mk|"
+    r"Luke|Lk|"
+    r"John|Jn|"
+    r"Acts?|Ac|"
+    r"Romans|Rom?|Rm|"
+    r"1\s?Corinthians?|1\s?Cor?|"
+    r"2\s?Corinthians?|2\s?Cor?|"
+    r"Galatians|Gal?|"
+    r"Ephesians|Eph?|"
+    r"Philippians|Phil?|Php|"
+    r"Colossians|Col?|"
+    r"1\s?Thessalonians?|1\s?Thess?|1\s?Th|"
+    r"2\s?Thessalonians?|2\s?Thess?|2\s?Th|"
+    r"1\s?Timothy|1\s?Tim?|1\s?Ti|"
+    r"2\s?Timothy|2\s?Tim?|2\s?Ti|"
+    r"Titus|Tit|"
+    r"Philemon|Philem?|Phlm|"
+    r"Hebrews|Heb?|"
+    r"James|Jas|"
+    r"1\s?Peter|1\s?Pet?|1\s?Pt|"
+    r"2\s?Peter|2\s?Pet?|2\s?Pt|"
+    r"1\s?John|1\s?Jn|"
+    r"2\s?John|2\s?Jn|"
+    r"3\s?John|3\s?Jn|"
+    r"Jude|Jd|"
+    r"Revelation|Rev?|Apoc"
+    r")\b"
+)
+
+# 2. The Full Regex: Book + Chapter + Separator + Verse
+VERSE_REGEX = re.compile(
+    BIBLE_BOOKS_PATTERN + r"\s+(\d+)\s*(:|v|vs|verse|\.)\s*(\d+)",
+    re.IGNORECASE 
+)
 
 # UPDATED: Default verse is now a Dictionary so buttons work even if API fails
 DEFAULT_VERSE = {
@@ -527,6 +608,47 @@ def handle_translation_switch(call):
         logger.error(f"Translation switch failed: {e}")
         bot.answer_callback_query(call.id, "Failed to switch translation.")
 
+# --- PASSIVE LISTENER HANDLER (MUST BE ABOVE HANDLE_TEXT) ---
+@bot.message_handler(func=lambda m: VERSE_REGEX.search(m.text))
+def handle_passive_verse(message):
+    """
+    Listens for patterns like 'John 3:16' or 'Matt 3 vs 4'
+    and replies with the scripture automatically.
+    """
+    try:
+        # 1. Find the match in the user's text
+        match = VERSE_REGEX.search(message.text)
+        if not match: return
+
+        # 2. Extract the parts (Book, Chapter, Separator, Verse)
+        # Group 1 is Book, Group 2 is Chapter, Group 4 is Verse
+        book = match.group(1)
+        chapter = match.group(2)
+        verse_num = match.group(4)
+        
+        # 3. Construct a clean reference (e.g., "Matthew 3:16")
+        reference = f"{book} {chapter}:{verse_num}"
+        
+        # 4. Fetch from API
+        # We pass the constructed reference to your existing function
+        data = fetch_verse_from_api(reference)
+        
+        if data:
+            # 5. Send Reply (Using your existing Button Helper)
+            # We use 'reply_to_message_id' so Theo quotes the specific message
+            text = f"*{data['reference']}* (WEB)\n\n{data['text'].strip()}"
+            markup = get_verse_markup(data, "web")
+            
+            bot.reply_to(message, text, reply_markup=markup)
+            
+            # Log it so you know it's working
+            logger.info(f"Auto-detected verse: {reference} from {message.from_user.first_name}")
+            
+    except Exception as e:
+        # If it wasn't a real verse (e.g. 'Matrix 1:1'), just stay silent
+        logger.warning(f"Passive listener error: {e}")
+
+# --- TEXT HANDLER (MUST BE LAST) ---
 @bot.message_handler(func=lambda m: True)
 def handle_text(m):
     text = m.text
