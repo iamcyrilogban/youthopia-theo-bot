@@ -41,8 +41,6 @@ DEFAULT_VERSE = "Psalm 23:1\n\nThe LORD is my shepherd, I lack nothing."
 bot = telebot.TeleBot(TOKEN, parse_mode="Markdown")
 
 # --- OPTIMIZATION: GET BOT ID ONCE ---
-# This fixes the bug where the bot doesn't respond when added to groups
-# because it was trying to fetch its ID too slowly.
 try:
     BOT_INFO = bot.get_me()
     BOT_ID = BOT_INFO.id
@@ -51,7 +49,30 @@ except Exception as e:
     logger.critical(f"Failed to get Bot ID: {e}")
     BOT_ID = 0
 
-# --- DATABASE CONNECTION ---
+# --- DATABASE CLASSES ---
+
+class MockDatabase:
+    """A Fake Database for Local Testing (Used when Real DB fails)"""
+    def __init__(self):
+        self.groups = []
+        logger.warning("WARNING: RUNNING IN DUMMY MODE (Mock DB). Data will be lost on restart.")
+
+    def add_group(self, chat_id, chat_name, joined_date):
+        for g in self.groups:
+            if g["_id"] == chat_id:
+                return False
+        self.groups.append({"_id": chat_id, "name": chat_name, "joined_at": joined_date})
+        logger.info(f"Mock DB: Added group {chat_name}")
+        return True
+
+    def remove_group(self, chat_id):
+        initial_len = len(self.groups)
+        self.groups = [g for g in self.groups if g["_id"] != chat_id]
+        return len(self.groups) < initial_len
+
+    def get_all_groups(self):
+        return self.groups
+
 class Database:
     """Database handler with connection pooling and error handling"""
     
@@ -107,8 +128,11 @@ class Database:
     def remove_group(self, chat_id):
         """Remove a group from the database"""
         try:
-            result = self.groups_col.delete_one({"_id": chat_id})
-            if result.deleted_count > 0:
+            # Try removing as Int and String to be safe
+            result_int = self.groups_col.delete_one({"_id": chat_id})
+            result_str = self.groups_col.delete_one({"_id": str(chat_id)})
+            
+            if result_int.deleted_count > 0 or result_str.deleted_count > 0:
                 logger.info(f"Removed group {chat_id} from database")
                 return True
             return False
@@ -116,11 +140,17 @@ class Database:
             logger.error(f"Error removing group from database: {e}")
             return False
 
-# Initialize database
+# --- SMART DATABASE SWITCH ---
+# This fixes the 'mute' error. If Real DB fails, it switches to Mock DB.
+db_handler = None
 try:
+    if not MONGO_URI:
+        raise ValueError("No MONGO_URI found in environment")
     db_handler = Database(MONGO_URI)
 except Exception as e:
-    logger.critical(f"CRITICAL DATABASE FAILURE: {e}")
+    logger.error(f"Real Database Failed: {e}")
+    logger.info("Switching to MOCK DATABASE for testing...")
+    db_handler = MockDatabase()
 
 # --- KEEP-ALIVE SERVER ---
 app = Flask(__name__)
@@ -137,8 +167,11 @@ def home():
 def health():
     """Health check endpoint"""
     try:
-        db_handler.client.admin.command('ping')
-        db_status = "connected"
+        if isinstance(db_handler, Database):
+            db_handler.client.admin.command('ping')
+            db_status = "connected"
+        else:
+            db_status = "mock_mode"
     except:
         db_status = "disconnected"
     
@@ -285,45 +318,48 @@ def send_help(message):
     )
     bot.reply_to(message, help_text)
 
-
+# --- UNIFIED REGISTER COMMAND ---
 @bot.message_handler(commands=["register"])
 def register(m):
     """Fix for: 'I am in the group but bot is silent'"""
-    # 1. Check if this is a private chat (The Bouncer)
+    
+    # 1. Safety Check (If DB is missing completely)
+    if db_handler is None:
+        bot.reply_to(m, "Critical Error: Database not initialized.")
+        return
+
+    # 2. Check if this is a private chat (The Bouncer)
     if m.chat.type == "private":
         bot.reply_to(m, "This command is for Groups only.\n\nAdd me to a Group and type /register there to set up daily verses!")
         return
 
-    # 2. Proceed with registration if it's a group (The Guest List)
+    # 3. Proceed with registration if it's a group (The Guest List)
     if db_handler.add_group(m.chat.id, m.chat.title, m.date):
         bot.reply_to(m, "Success! This group is now registered for daily verses.")
     else:
         bot.reply_to(m, "This group is already registered. Use /force_verse to test.")
 
-# --- CRITICAL FIX 1: MANUAL REGISTER COMMAND ---
-@bot.message_handler(commands=["register"])
-def register_group(message):
-    """Fix for groups that aren't receiving verses"""
-    if db_handler.add_group(message.chat.id, message.chat.title, message.date):
-        bot.reply_to(message, "Success! This group is now registered for daily verses.")
-    else:
-        bot.reply_to(message, "This group is already registered. Use /force_verse to test.")
-
-# --- CRITICAL FIX 2: FORCE VERSE COMMAND ---
 @bot.message_handler(commands=["force_verse"])
 def force_verse(message):
     """Test command to verify sending works"""
     bot.reply_to(message, "Sending verse blast now...")
     send_morning_verse()
 
-# --- CRITICAL FIX 3: RESET GROUP COMMAND ---
 @bot.message_handler(commands=["reset_group"])
-def reset_group(message):
+def reset_group(m):
     """Fix for testing welcome messages"""
-    if db_handler.remove_group(message.chat.id):
-        bot.reply_to(message, "Memory wiped! Remove me and add me again to see the 'Hello' message.")
-    else:
-        bot.reply_to(message, "Group was not in database.")
+    try:
+        # Check if running in Private Chat (Mistake)
+        if m.chat.type == "private":
+            bot.reply_to(m, "You must run this command INSIDE the group you want to reset.")
+            return
+
+        if db_handler.remove_group(m.chat.id):
+            bot.reply_to(m, "Memory wiped! Remove me and add me again to see the 'Hello' message.")
+        else:
+            bot.reply_to(m, "Group was not in database.")
+    except Exception as e:
+        bot.reply_to(m, f"Error: {e}")
 
 @bot.message_handler(commands=["verse"])
 def send_verse(message):
@@ -337,8 +373,11 @@ def send_verse(message):
 @bot.message_handler(commands=["ping"])
 def ping(message):
     try:
-        db_handler.client.admin.command('ping')
-        db_status = "Connected"
+        if isinstance(db_handler, Database):
+            db_handler.client.admin.command('ping')
+            db_status = "Connected"
+        else:
+            db_status = "Mock DB (Test Mode)"
     except:
         db_status = "Disconnected"
     
@@ -353,7 +392,7 @@ def ping(message):
 @bot.message_handler(content_types=["new_chat_members"])
 def on_join(message):
     for new_member in message.new_chat_members:
-        # --- CRITICAL FIX 4: Use Cached BOT_ID ---
+        # --- CRITICAL FIX: Use Cached BOT_ID ---
         if new_member.id == BOT_ID:
             chat_id = message.chat.id
             chat_name = message.chat.title or "Unknown Group"
