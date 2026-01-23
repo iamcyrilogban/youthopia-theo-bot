@@ -232,7 +232,8 @@ def fetch_verse_from_api(reference):
         response.raise_for_status()
         api_data = response.json()
         
-        return f"*{api_data['reference']}*\n\n{api_data['text'].strip()}"
+        # CHANGED LINE BELOW: Added (WEB) to the reference header
+        return f"*{api_data['reference']}* (WEB)\n\n{api_data['text'].strip()}"
     except Exception as e:
         logger.error(f"API request failed: {e}")
         return None
