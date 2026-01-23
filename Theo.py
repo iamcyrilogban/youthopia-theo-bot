@@ -141,16 +141,22 @@ class Database:
             return False
 
 # --- SMART DATABASE SWITCH ---
-# This fixes the 'mute' error. If Real DB fails, it switches to Mock DB.
+# FIX: Prevents "Zombie Mode" on production.
 db_handler = None
-try:
-    if not MONGO_URI:
-        raise ValueError("No MONGO_URI found in environment")
-    db_handler = Database(MONGO_URI)
-except Exception as e:
-    logger.error(f"Real Database Failed: {e}")
-    logger.info("Switching to MOCK DATABASE for testing...")
+
+if not MONGO_URI:
+    # Scenario 1: No Link provided (Local Testing / Random Editor)
+    logger.warning("⚠️ MONGO_URI not found. Using MockDatabase (Data will be lost on restart).")
     db_handler = MockDatabase()
+else:
+    # Scenario 2: Link provided (Production / Render)
+    try:
+        db_handler = Database(MONGO_URI)
+    except Exception as e:
+        # If the Real DB fails, we MUST crash so the server restarts.
+        # Do not switch to MockDB here, or you will lose user data!
+        logger.critical(f"❌ Failed to connect to Real MongoDB: {e}")
+        raise e  # Stops the bot completely
 
 # --- KEEP-ALIVE SERVER ---
 app = Flask(__name__)
@@ -193,14 +199,17 @@ def keep_alive():
 # --- HELPER FUNCTIONS ---
 
 def main_menu_keyboard():
-    """Creates the professional menu buttons"""
+    """Creates the professional menu buttons with Subscribe option"""
     markup = telebot.types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+    
     btn_verse = telebot.types.KeyboardButton("Get Verse")
+    btn_sub = telebot.types.KeyboardButton("Subscribe")
     btn_ping = telebot.types.KeyboardButton("Check Status")
     btn_help = telebot.types.KeyboardButton("Help")
-    markup.add(btn_verse, btn_ping, btn_help)
-    return markup
+    
 
+    markup.add(btn_verse, btn_sub, btn_ping, btn_help)
+    return markup
 def load_verse_references():
     try:
         with open(VERSES_FILE, "r") as f:
@@ -340,24 +349,45 @@ def register(m):
         bot.reply_to(m, "This group is already registered. Use /force_verse to test.")
 
 @bot.message_handler(commands=["force_verse"])
-def force_verse(message):
-    """Test command to verify sending works"""
-    bot.reply_to(message, "Sending verse blast now...")
-    send_morning_verse()
+def force_verse(m):
+    """Secured Test command - Only the Admin can use this"""
+    
+    # SECURITY CHECK: Is this the Admin?
+    if m.from_user.id != ADMIN_ID:
+        # Log the attempt so you know someone tried it
+        logger.warning(f"Unauthorized broadcast attempt by {m.from_user.first_name} (ID: {m.from_user.id})")
+        # Ignore them (Security through silence)
+        return
 
+    bot.reply_to(m, "Authorized. Sending verse blast now...")
+    send_morning_verse()
 @bot.message_handler(commands=["reset_group"])
 def reset_group(m):
-    """Fix for testing welcome messages"""
+    """Safely removes group/user from DB (Admins Only in Groups)"""
     try:
-        # Check if running in Private Chat (Mistake)
+        # 1. Private Chat Logic (Users can always unsubscribe themselves)
         if m.chat.type == "private":
-            bot.reply_to(m, "You must run this command INSIDE the group you want to reset.")
+            if db_handler.remove_group(m.chat.id):
+                bot.reply_to(m, "Memory wiped! You are unsubscribed.")
+            else:
+                bot.reply_to(m, "You were not subscribed.")
             return
 
+        # 2. Group Chat Logic (SECURITY CHECK)
+        # Check if the user is an Admin or Creator
+        member = bot.get_chat_member(m.chat.id, m.from_user.id)
+        
+        # Allow if they are Admin, Creator, OR if it is YOU (The Bot Owner)
+        if member.status not in ['administrator', 'creator'] and m.from_user.id != ADMIN_ID:
+            bot.reply_to(m, "❌ Permission Denied. Only Group Admins can run this command.")
+            return
+
+        # 3. Perform Removal
         if db_handler.remove_group(m.chat.id):
-            bot.reply_to(m, "Memory wiped! Remove me and add me again to see the 'Hello' message.")
+            bot.reply_to(m, "🗑️ Memory wiped! This group is unsubscribed.")
         else:
-            bot.reply_to(m, "Group was not in database.")
+            bot.reply_to(m, "⚠️ Group was not in database.")
+
     except Exception as e:
         bot.reply_to(m, f"Error: {e}")
 
@@ -423,22 +453,29 @@ def on_leave(message):
         chat_id = message.chat.id
         db_handler.remove_group(chat_id)
 
-@bot.message_handler(func=lambda message: True)
-def handle_messages(message):
-    text = message.text
+@bot.message_handler(func=lambda m: True)
+def handle_text(m):
+    text = m.text
     
-    if text == "Get Verse":
-        send_verse(message)
-    elif text == "Check Status":
-        ping(message)
-    elif text == "Help":
-        send_help(message)
-    elif message.chat.type == "private":
-        bot.reply_to(
-            message,
-            "I didn't recognize that command. Please use the menu below or type /help.",
-            reply_markup=main_menu_keyboard()
-        )
+    if text == "Get Verse": 
+        send_verse(m)
+    elif text == "Check Status": 
+        ping(m)
+    elif text == "Help": 
+        send_help(m)
+        
+    elif text == "Subscribe":
+        # If in a group, use Title. If Private DM, use First Name.
+        name = m.chat.title or m.from_user.first_name or "Subscriber"
+        
+        # Save to database (Treating the User ID just like a Group ID)
+        if db_handler.add_group(m.chat.id, name, m.date):
+            bot.reply_to(m, "Subscribed! You will receive daily verses in your DM every morning.")
+        else:
+            bot.reply_to(m, "You are already subscribed!")
+            
+    elif m.chat.type == "private":
+         bot.reply_to(m, "I didn't recognize that command. Use the buttons below.", reply_markup=main_menu_keyboard())
 
 # --- MAIN EXECUTION ---
 if __name__ == "__main__":
